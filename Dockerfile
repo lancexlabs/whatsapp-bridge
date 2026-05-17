@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-# Install Chromium + all required system libraries for Puppeteer
+# Install Chromium and all required system libraries for Puppeteer
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-freefont-ttf \
@@ -23,9 +23,12 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Tell Puppeteer to use the system Chromium instead of downloading its own
+# Use system Chromium instead of downloading via Puppeteer
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+# Your Railway backend URL — bridge pushes connected state here
+ENV RAILWAY_URL=https://mech-production-30d8.up.railway.app
 
 WORKDIR /app
 
@@ -34,7 +37,6 @@ RUN npm install --production
 
 COPY whatsapp-bridge.js ./
 
-# Render uses the PORT env variable automatically
 EXPOSE 4322
 
 CMD ["node", "whatsapp-bridge.js"]
