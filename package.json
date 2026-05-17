@@ -1,0 +1,18 @@
+{
+  "name": "mechtrack-whatsapp-bridge",
+  "version": "1.0.0",
+  "description": "MechTrack WhatsApp Bridge — runs on Render",
+  "main": "whatsapp-bridge.js",
+  "scripts": {
+    "start": "node whatsapp-bridge.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "qrcode": "^1.5.3",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
