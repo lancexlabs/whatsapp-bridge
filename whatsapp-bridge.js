@@ -104,10 +104,10 @@ async function initializeClient() {
             dataPath: SESSION_PATH,
             clientId: 'mechtrack'
         }),
-        webVersion: '2.2412.54',
+        webVersion: '2.3000.1015901307',
         webVersionCache: {
             type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
+            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1015901307.html'
         },
         puppeteer: {
             headless: true,
