@@ -15,29 +15,14 @@ const RAILWAY_API_URL = process.env.RAILWAY_API_URL || "https://mech-production-
 
 let client = null;
 let currentQr = null;
+let currentQrBase64 = null;
 let isReady = false;
 let isInitializing = false;
-let qrGenerationAttempts = 0;
 
 function log(icon, msg) {
     const ts = new Date().toLocaleTimeString('en-IN');
     console.log(`[${ts}] ${icon} ${msg}`);
 }
-
-// Force QR generation by restarting if no QR after 30 seconds
-setInterval(() => {
-    if (!isReady && !currentQr && isInitializing) {
-        qrGenerationAttempts++;
-        log('⚠️', `No QR yet (attempt ${qrGenerationAttempts})...`);
-        
-        if (qrGenerationAttempts > 6) { // 3 minutes
-            log('🔄', 'Restarting client to generate QR...');
-            destroyClient();
-            setTimeout(() => initializeClient(), 2000);
-            qrGenerationAttempts = 0;
-        }
-    }
-}, 30000);
 
 async function destroyClient() {
     if (client) {
@@ -50,6 +35,25 @@ async function destroyClient() {
     isInitializing = false;
 }
 
+async function pushQrToRailway(qrBase64) {
+    try {
+        log('☁️', 'Pushing QR to Railway...');
+        const response = await fetch(`${RAILWAY_API_URL}/whatsapp/push-qr`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ qr: qrBase64, timestamp: new Date().toISOString() })
+        });
+        
+        if (response.ok) {
+            log('✅', 'QR pushed to Railway successfully!');
+        } else {
+            log('⚠️', `Railway returned: ${response.status}`);
+        }
+    } catch (err) {
+        log('⚠️', `Failed to push QR: ${err.message}`);
+    }
+}
+
 async function initializeClient() {
     if (isInitializing) {
         log('⏳', 'Already initializing...');
@@ -57,16 +61,7 @@ async function initializeClient() {
     }
 
     isInitializing = true;
-    qrGenerationAttempts = 0;
     log('🚀', 'Starting WhatsApp client...');
-
-    // Clear old session to force new QR
-    if (fs.existsSync(SESSION_PATH)) {
-        try {
-            fs.rmSync(SESSION_PATH, { recursive: true, force: true });
-            log('🗑️', 'Cleared old session for fresh QR');
-        } catch(e) {}
-    }
 
     client = new Client({
         authStrategy: new LocalAuth({
@@ -90,54 +85,29 @@ async function initializeClient() {
     });
 
     client.on('qr', async (qr) => {
-        log('📱', '✅ QR CODE GENERATED!');
+        log('📱', 'QR CODE GENERATED!');
         currentQr = qr;
         
-        // Generate QR as data URL
         try {
-            const qrDataUrl = await qrcode.toDataURL(qr, {
+            currentQrBase64 = await qrcode.toDataURL(qr, {
                 margin: 2,
                 width: 300,
                 color: { dark: '#000000', light: '#FFFFFF' }
             });
             
-            // Push to Railway
-            log('☁️', 'Pushing QR to Railway...');
-            const response = await fetch(`${RAILWAY_API_URL}/whatsapp/push-qr`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    qr: qrDataUrl,
-                    timestamp: new Date().toISOString(),
-                    raw_qr: qr.substring(0, 100) // First 100 chars for debug
-                })
-            });
-            
-            if (response.ok) {
-                log('✅', 'QR successfully sent to Railway!');
-                log('📱', 'Client can now scan QR from the web interface');
-            } else {
-                const error = await response.text();
-                log('❌', `Railway returned: ${response.status} - ${error}`);
-            }
+            await pushQrToRailway(currentQrBase64);
+            log('✅', 'QR ready for scanning');
         } catch (err) {
-            log('❌', `Failed to process QR: ${err.message}`);
+            log('❌', `QR error: ${err.message}`);
         }
-        
-        // Also log to console for terminal viewing
-        console.log('\n📱 SCAN THIS QR CODE WITH WHATSAPP:\n');
-        const terminalQr = require('qrcode-terminal');
-        terminalQr.generate(qr, { small: true });
-        console.log('\n');
     });
 
     client.on('ready', () => {
-        log('🎉', '✅ WHATSAPP CONNECTED AND READY!');
+        log('🎉', 'WHATSAPP CONNECTED AND READY!');
         isReady = true;
         isInitializing = false;
         currentQr = null;
         
-        // Notify Railway
         fetch(`${RAILWAY_API_URL}/whatsapp/bridge-ready`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -159,32 +129,37 @@ async function initializeClient() {
 
     try {
         await client.initialize();
-        log('✅', 'Client initialized, waiting for QR...');
+        log('✅', 'Client initialized');
     } catch (err) {
         log('❌', `Init error: ${err.message}`);
         isInitializing = false;
     }
 }
 
-// Simple routes
+// ============ EXPRESS ROUTES ============
+
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
         ready: isReady, 
-        qr_available: !!currentQr,
+        qr_available: !!currentQrBase64,
         connecting: isInitializing 
     });
 });
 
-app.get('/qr', (req, res) => {
+app.get('/status', (req, res) => {
+    res.json({ 
+        ready: isReady, 
+        connecting: isInitializing,
+        qr_available: !!currentQrBase64
+    });
+});
+
+app.get('/qr', async (req, res) => {
     if (isReady) {
         res.json({ ready: true, message: 'Already connected' });
-    } else if (currentQr) {
-        qrcode.toDataURL(currentQr, { margin: 2, width: 300 }).then(qrUrl => {
-            res.json({ qr: qrUrl, ready: false });
-        }).catch(err => {
-            res.status(500).json({ error: err.message });
-        });
+    } else if (currentQrBase64) {
+        res.json({ qr: currentQrBase64, ready: false });
     } else {
         res.json({ qr: null, ready: false, connecting: isInitializing });
     }
@@ -192,22 +167,33 @@ app.get('/qr', (req, res) => {
 
 app.post('/send-message', async (req, res) => {
     const { phone, message } = req.body;
-    if (!phone || !message) return res.status(400).json({ error: 'Phone and message required' });
-    if (!isReady || !client) return res.status(503).json({ error: 'WhatsApp not ready' });
+    
+    if (!phone || !message) {
+        return res.status(400).json({ error: 'Phone and message required' });
+    }
+    
+    if (!isReady || !client) {
+        return res.status(503).json({ error: 'WhatsApp not ready', ready: isReady });
+    }
 
     let clean = phone.replace(/\D/g, '');
     if (clean.length === 10) clean = '91' + clean;
+    if (clean.length === 11 && clean.startsWith('0')) clean = '91' + clean.substring(1);
     if (!clean.startsWith('91')) clean = '91' + clean;
 
     try {
         const chatId = `${clean}@c.us`;
         const numberDetails = await client.getNumberId(chatId);
-        if (!numberDetails) return res.status(400).json({ error: 'Number not on WhatsApp' });
+        
+        if (!numberDetails) {
+            return res.status(400).json({ error: 'Number not on WhatsApp' });
+        }
         
         const sent = await client.sendMessage(chatId, message);
         log('✅', `Message sent to ${clean}`);
         res.json({ success: true, messageId: sent.id.id });
     } catch (err) {
+        log('❌', `Send error: ${err.message}`);
         res.status(500).json({ error: err.message });
     }
 });
@@ -215,14 +201,32 @@ app.post('/send-message', async (req, res) => {
 app.post('/reset', async (req, res) => {
     log('🔄', 'Resetting...');
     await destroyClient();
-    setTimeout(() => initializeClient(), 1000);
+    
+    if (fs.existsSync(SESSION_PATH)) {
+        fs.rmSync(SESSION_PATH, { recursive: true, force: true });
+    }
+    
+    setTimeout(() => initializeClient(), 2000);
     res.json({ success: true });
 });
 
+app.post('/disconnect', async (req, res) => {
+    await destroyClient();
+    res.json({ success: true });
+});
+
+// Serve static files (for QR HTML page)
+app.use(express.static(path.join(__dirname, 'public')));
+
 const server = app.listen(PORT, '0.0.0.0', () => {
-    log('🚀', `Bridge running on port ${PORT}`);
+    log('🚀', `WhatsApp Bridge running on port ${PORT}`);
+    log('🔗', `QR API: http://localhost:${PORT}/qr`);
+    log('🔗', `Status: http://localhost:${PORT}/status`);
     log('🔗', `Railway URL: ${RAILWAY_API_URL}`);
     initializeClient();
 });
 
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
+process.on('SIGTERM', () => {
+    log('🛑', 'Shutting down...');
+    server.close(() => process.exit(0));
+});
