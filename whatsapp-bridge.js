@@ -12,6 +12,15 @@ const path = require('path');
 const app = express();
 app.use(express.json());
 
+// ✅ CORS — allow requests from any origin (Railway, browser, etc.)
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+});
+
 // Render assigns PORT via env variable
 const PORT = process.env.PORT || 4322;
 const SESSION_PATH = path.join(__dirname, 'whatsapp-session');
