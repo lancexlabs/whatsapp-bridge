@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-# Install Chromium and all required system libraries for Puppeteer
+# Install Chromium + required libraries for Puppeteer
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-freefont-ttf \
@@ -23,20 +23,28 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Use system Chromium instead of downloading via Puppeteer
+# Tell Puppeteer to use system Chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Your Railway backend URL — bridge pushes connected state here
-ENV RAILWAY_URL=https://mech-production-30d8.up.railway.app
-
 WORKDIR /app
 
-COPY package.json ./
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
 RUN npm install --production
 
+# Copy bridge code
 COPY whatsapp-bridge.js ./
 
+# Create public directory for QR
+RUN mkdir -p public
+
 EXPOSE 4322
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:4322/health', (r) => {r.statusCode === 200 ? process.exit(0) : process.exit(1)})"
 
 CMD ["node", "whatsapp-bridge.js"]
