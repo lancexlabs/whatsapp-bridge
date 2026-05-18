@@ -22,6 +22,7 @@ const RAILWAY_API_URL = process.env.RAILWAY_API_URL || "https://mech-production-
 
 let client = null;
 let currentQrBase64 = null;
+let qrGeneratedAt = null;   // ✅ timestamp of latest QR
 let isReady = false;
 let isInitializing = false;
 let reconnectTimer = null;
@@ -117,11 +118,11 @@ async function initializeClient() {
         log('📱', 'QR CODE GENERATED!');
         try {
             currentQrBase64 = await qrcode.toDataURL(qr, {
-                margin: 2,
-                width: 300,
+                margin: 2, width: 300,
                 color: { dark: '#000000', light: '#FFFFFF' }
             });
-            log('✅', 'QR base64 ready');
+            qrGeneratedAt = new Date().toISOString();  // ✅ mark when this QR was made
+            log('✅', `QR ready at ${qrGeneratedAt}`);
             await pushQrToRailway(currentQrBase64);
         } catch (err) {
             log('❌', `QR error: ${err.message}`);
@@ -209,7 +210,11 @@ app.get('/status', (req, res) => {
 
 app.get('/qr', async (req, res) => {
     if (isReady) return res.json({ ready: true, message: 'Already connected' });
-    if (currentQrBase64) return res.json({ qr: currentQrBase64, ready: false });
+    if (currentQrBase64) return res.json({
+        qr: currentQrBase64,
+        ready: false,
+        timestamp: qrGeneratedAt   // ✅ HTML uses this to detect new QR
+    });
     res.json({ qr: null, ready: false, connecting: isInitializing });
 });
 
