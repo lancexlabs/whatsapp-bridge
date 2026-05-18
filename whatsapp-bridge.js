@@ -7,17 +7,24 @@ const path = require('path');
 const app = express();
 app.use(express.json());
 
+// ✅ CORS — allow all origins
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+});
+
 const PORT = process.env.PORT || 4322;
 const SESSION_PATH = path.join(__dirname, 'whatsapp-session');
-
-// Your Railway URL
 const RAILWAY_API_URL = process.env.RAILWAY_API_URL || "https://mech-production-30d8.up.railway.app";
 
 let client = null;
-let currentQr = null;
 let currentQrBase64 = null;
 let isReady = false;
 let isInitializing = false;
+let reconnectTimer = null;
 
 function log(icon, msg) {
     const ts = new Date().toLocaleTimeString('en-IN');
@@ -25,10 +32,9 @@ function log(icon, msg) {
 }
 
 async function destroyClient() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (client) {
-        try {
-            await client.destroy();
-        } catch (e) {}
+        try { client.removeAllListeners(); await client.destroy(); } catch (e) {}
         client = null;
     }
     isReady = false;
@@ -43,9 +49,8 @@ async function pushQrToRailway(qrBase64) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ qr: qrBase64, timestamp: new Date().toISOString() })
         });
-        
         if (response.ok) {
-            log('✅', 'QR pushed to Railway successfully!');
+            log('✅', `QR pushed! Scan at: ${RAILWAY_API_URL}/whatsapp/qr`);
         } else {
             log('⚠️', `Railway returned: ${response.status}`);
         }
@@ -55,12 +60,17 @@ async function pushQrToRailway(qrBase64) {
 }
 
 async function initializeClient() {
-    if (isInitializing) {
-        log('⏳', 'Already initializing...');
-        return;
-    }
+    if (isInitializing) { log('⏳', 'Already initializing...'); return; }
 
     isInitializing = true;
+    currentQrBase64 = null;
+
+    if (fs.existsSync(SESSION_PATH)) {
+        log('💾', 'Found saved session — reconnecting without QR...');
+    } else {
+        log('🆕', 'No session — will generate QR...');
+    }
+
     log('🚀', 'Starting WhatsApp client...');
 
     client = new Client({
@@ -68,8 +78,16 @@ async function initializeClient() {
             dataPath: SESSION_PATH,
             clientId: 'mechtrack'
         }),
+        // ✅ Latest working webVersion — DO NOT REMOVE
+        webVersion: '2.3000.1015901307',
+        webVersionCache: {
+            type: 'remote',
+            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1015901307.html'
+        },
         puppeteer: {
             headless: true,
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+            timeout: 120000,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -79,52 +97,75 @@ async function initializeClient() {
                 '--no-first-run',
                 '--no-zygote',
                 '--single-process',
-                '--disable-extensions'
-            ]
-        }
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-default-apps',
+                '--disable-sync',
+                '--disable-translate',
+                '--hide-scrollbars',
+                '--mute-audio',
+                '--disable-background-timer-throttling',
+                '--window-size=800,600'
+            ],
+            ignoreHTTPSErrors: true,
+            defaultViewport: null,
+        },
     });
 
+    // ✅ QR received
     client.on('qr', async (qr) => {
         log('📱', 'QR CODE GENERATED!');
-        currentQr = qr;
-        
         try {
             currentQrBase64 = await qrcode.toDataURL(qr, {
                 margin: 2,
                 width: 300,
                 color: { dark: '#000000', light: '#FFFFFF' }
             });
-            
+            log('✅', 'QR base64 ready');
             await pushQrToRailway(currentQrBase64);
-            log('✅', 'QR ready for scanning');
         } catch (err) {
             log('❌', `QR error: ${err.message}`);
         }
     });
 
+    client.on('authenticated', () => {
+        log('✅', 'Authenticated!');
+    });
+
+    // ✅ Stay alive — no process.exit
     client.on('ready', () => {
         log('🎉', 'WHATSAPP CONNECTED AND READY!');
         isReady = true;
         isInitializing = false;
-        currentQr = null;
-        
+        currentQrBase64 = null;
+
+        // Notify Railway
         fetch(`${RAILWAY_API_URL}/whatsapp/bridge-ready`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: 'ready' })
-        }).catch(e => log('⚠️', 'Could not notify Railway'));
+        }).catch(() => {});
     });
 
-    client.on('auth_failure', (msg) => {
+    client.on('auth_failure', async (msg) => {
         log('❌', `Auth failed: ${msg}`);
+        log('🗑️', 'Clearing session, retrying in 10s...');
         isInitializing = false;
+        try {
+            if (fs.existsSync(SESSION_PATH)) {
+                fs.rmSync(SESSION_PATH, { recursive: true, force: true });
+            }
+        } catch (e) {}
+        reconnectTimer = setTimeout(() => initializeClient(), 10000);
     });
 
-    client.on('disconnected', (reason) => {
-        log('⚠️', `Disconnected: ${reason}`);
+    // ✅ Auto-reconnect
+    client.on('disconnected', async (reason) => {
+        log('⚠️', `Disconnected: ${reason} — reconnecting in 5s...`);
         isReady = false;
         isInitializing = false;
-        setTimeout(() => initializeClient(), 5000);
+        await destroyClient();
+        reconnectTimer = setTimeout(() => initializeClient(), 5000);
     });
 
     try {
@@ -133,48 +174,49 @@ async function initializeClient() {
     } catch (err) {
         log('❌', `Init error: ${err.message}`);
         isInitializing = false;
+        log('🔄', 'Retrying in 15s...');
+        reconnectTimer = setTimeout(() => initializeClient(), 15000);
     }
 }
 
-// ============ EXPRESS ROUTES ============
+// ============ ROUTES ============
+
+app.get('/', (req, res) => {
+    res.json({
+        service: 'MechTrack WhatsApp Bridge',
+        status: isReady ? '✅ Connected' : isInitializing ? '⏳ Connecting...' : '❌ Disconnected',
+        ready: isReady,
+        railway_url: RAILWAY_API_URL
+    });
+});
 
 app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        ready: isReady, 
-        qr_available: !!currentQrBase64,
-        connecting: isInitializing 
+    res.json({
+        status: 'ok',
+        ready: isReady,
+        connecting: isInitializing,
+        qr_available: !!currentQrBase64
     });
 });
 
 app.get('/status', (req, res) => {
-    res.json({ 
-        ready: isReady, 
+    res.json({
+        ready: isReady,
         connecting: isInitializing,
         qr_available: !!currentQrBase64
     });
 });
 
 app.get('/qr', async (req, res) => {
-    if (isReady) {
-        res.json({ ready: true, message: 'Already connected' });
-    } else if (currentQrBase64) {
-        res.json({ qr: currentQrBase64, ready: false });
-    } else {
-        res.json({ qr: null, ready: false, connecting: isInitializing });
-    }
+    if (isReady) return res.json({ ready: true, message: 'Already connected' });
+    if (currentQrBase64) return res.json({ qr: currentQrBase64, ready: false });
+    res.json({ qr: null, ready: false, connecting: isInitializing });
 });
 
 app.post('/send-message', async (req, res) => {
     const { phone, message } = req.body;
-    
-    if (!phone || !message) {
-        return res.status(400).json({ error: 'Phone and message required' });
-    }
-    
-    if (!isReady || !client) {
-        return res.status(503).json({ error: 'WhatsApp not ready', ready: isReady });
-    }
+    if (!phone || !message) return res.status(400).json({ error: 'Phone and message required' });
+    if (!isReady || !client) return res.status(503).json({ error: 'WhatsApp not ready', ready: isReady });
 
     let clean = phone.replace(/\D/g, '');
     if (clean.length === 10) clean = '91' + clean;
@@ -184,11 +226,7 @@ app.post('/send-message', async (req, res) => {
     try {
         const chatId = `${clean}@c.us`;
         const numberDetails = await client.getNumberId(chatId);
-        
-        if (!numberDetails) {
-            return res.status(400).json({ error: 'Number not on WhatsApp' });
-        }
-        
+        if (!numberDetails) return res.status(400).json({ error: 'Number not on WhatsApp' });
         const sent = await client.sendMessage(chatId, message);
         log('✅', `Message sent to ${clean}`);
         res.json({ success: true, messageId: sent.id.id });
@@ -199,15 +237,15 @@ app.post('/send-message', async (req, res) => {
 });
 
 app.post('/reset', async (req, res) => {
-    log('🔄', 'Resetting...');
+    log('🔄', 'Resetting bridge...');
     await destroyClient();
-    
-    if (fs.existsSync(SESSION_PATH)) {
-        fs.rmSync(SESSION_PATH, { recursive: true, force: true });
-    }
-    
+    try {
+        if (fs.existsSync(SESSION_PATH)) {
+            fs.rmSync(SESSION_PATH, { recursive: true, force: true });
+        }
+    } catch (e) {}
     setTimeout(() => initializeClient(), 2000);
-    res.json({ success: true });
+    res.json({ success: true, message: 'Resetting — new QR generating' });
 });
 
 app.post('/disconnect', async (req, res) => {
@@ -215,18 +253,16 @@ app.post('/disconnect', async (req, res) => {
     res.json({ success: true });
 });
 
-// Serve static files (for QR HTML page)
-app.use(express.static(path.join(__dirname, 'public')));
+// ============ START ============
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-    log('🚀', `WhatsApp Bridge running on port ${PORT}`);
-    log('🔗', `QR API: http://localhost:${PORT}/qr`);
-    log('🔗', `Status: http://localhost:${PORT}/status`);
+app.listen(PORT, '0.0.0.0', () => {
+    log('🚀', `Bridge running on port ${PORT}`);
     log('🔗', `Railway URL: ${RAILWAY_API_URL}`);
     initializeClient();
 });
 
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
     log('🛑', 'Shutting down...');
-    server.close(() => process.exit(0));
+    await destroyClient();
+    process.exit(0);
 });
