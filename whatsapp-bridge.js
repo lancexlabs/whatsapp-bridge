@@ -66,6 +66,32 @@ async function initializeClient() {
     isInitializing = true;
     currentQrBase64 = null;
 
+    // ✅ Clear Chrome lock files — prevents "browser already running" error on Render
+    try {
+        const lockFiles = [
+            path.join(SESSION_PATH, 'session-mechtrack', 'SingletonLock'),
+            path.join(SESSION_PATH, 'session-mechtrack', 'SingletonCookie'),
+            path.join(SESSION_PATH, 'session-mechtrack', 'SingletonSocket'),
+        ];
+        for (const f of lockFiles) {
+            if (fs.existsSync(f)) {
+                fs.rmSync(f, { force: true });
+                log('🗑️', `Cleared lock: ${path.basename(f)}`);
+            }
+        }
+        // Clear any .org.chromium.* temp files
+        const sessionDir = path.join(SESSION_PATH, 'session-mechtrack');
+        if (fs.existsSync(sessionDir)) {
+            const files = fs.readdirSync(sessionDir);
+            files.filter(f => f.startsWith('.org.chromium')).forEach(f => {
+                fs.rmSync(path.join(sessionDir, f), { force: true });
+                log('🗑️', `Cleared chromium temp: ${f}`);
+            });
+        }
+    } catch (e) {
+        log('⚠️', `Lock cleanup error: ${e.message}`);
+    }
+
     if (fs.existsSync(SESSION_PATH)) {
         log('💾', 'Found saved session — reconnecting without QR...');
     } else {
